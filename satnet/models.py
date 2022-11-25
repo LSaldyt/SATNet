@@ -2,10 +2,20 @@ import torch
 import torch.nn as nn
 from torch.autograd import Function
 import torch.optim as optim
+import math
 
 import satnet._cpp
 if torch.cuda.is_available(): import satnet._cuda
 
+def tri_modal_gauss(x, σ):
+    gauss = lambda m : torch.sign(m) * torch.exp(-(m**2)/2*(σ**2))
+    return gauss(x + 1) + gauss(x) + gauss(x - 1)
+
+# Manual derivative of tri-modal gauss, because SATNet developers like nitty gritty detail..
+# Might not be needed, trying torch.requires_grad
+# def d_tri_modal_gauss(x, σ):
+#     d_gauss = lambda m : torch.sign(m) * -1. * m * torch.exp(-(m**2)/2*(σ**2)) / torch.sqrt(2. * math.pi)
+#     return d_gauss(x + 1) + d_gauss(x) + d_gauss(x - 1)
 
 def get_k(n):
     return int((2*n)**0.5+3)//4*4
@@ -15,15 +25,15 @@ class MixingFunc(Function):
 
     Args: see SATNet.
 
-    Impl Note: 
+    Impl Note:
         The SATNet is a wrapper for the MixingFunc,
         handling the initialization and the wrapping of auxiliary variables.
     '''
     @staticmethod
-    def forward(ctx, S, z, is_input, max_iter, eps, prox_lam):
+    def forward(ctx, S, z, is_input, max_iter, eps, prox_lam, tri_modal=False, σ=1.0):
         B, n, m, k = z.size(0), S.size(0), S.size(1), 32 #get_k(S.size(0))
         ctx.prox_lam = prox_lam
-        
+
         device = 'cuda' if S.is_cuda else 'cpu'
         ctx.g, ctx.gnrm = torch.zeros(B,k, device=device), torch.zeros(B,n, device=device)
         ctx.index = torch.zeros(B,n, dtype=torch.int, device=device)
@@ -34,6 +44,9 @@ class MixingFunc(Function):
 
         ctx.S = torch.zeros(n,m, device=device)
         ctx.Snrms = torch.zeros(n, device=device)
+
+        if tri_modal:
+            S = tri_modal_gauss(S, σ)
 
         ctx.z[:] = z.data
         ctx.S[:] = S.data
@@ -47,13 +60,13 @@ class MixingFunc(Function):
         for b in range(B):
             ctx.W[b] = ctx.V[b].t().mm(ctx.S)
         ctx.Snrms[:] = S.norm(dim=1)**2
-        
-        satnet_impl.forward(max_iter, eps, 
-                ctx.index, ctx.niter, ctx.S, ctx.z, 
+
+        satnet_impl.forward(max_iter, eps,
+                ctx.index, ctx.niter, ctx.S, ctx.z,
                 ctx.V, ctx.W, ctx.gnrm, ctx.Snrms, ctx.g)
 
         return ctx.z.clone()
-    
+
     @staticmethod
     def backward(ctx, dz):
         B, n, m, k = dz.size(0), ctx.S.size(0), ctx.S.size(1), 32 #get_k(ctx.S.size(0))
@@ -66,7 +79,7 @@ class MixingFunc(Function):
         ctx.dz[:] = dz.data
 
         satnet_impl = satnet._cuda if ctx.S.is_cuda else satnet._cpp
-        satnet_impl.backward(ctx.prox_lam, 
+        satnet_impl.backward(ctx.prox_lam,
                 ctx.is_input, ctx.index, ctx.niter, ctx.S, ctx.dS, ctx.z, ctx.dz,
                 ctx.V, ctx.U, ctx.W, ctx.Phi, ctx.gnrm, ctx.Snrms, ctx.g)
 
@@ -75,8 +88,7 @@ class MixingFunc(Function):
         return ctx.dS, ctx.dz, None, None, None, None
 
 def insert_constants(x, pre, n_pre, app, n_app):
-    ''' prepend and append torch tensors
-    '''
+    ''' prepend and append torch tensors '''
     one  = x.new(x.size()[0],1).fill_(1)
     seq = []
     if n_pre != 0:
@@ -110,18 +122,18 @@ class SATNet(nn.Module):
             Default: True
 
     Inputs: (z, is_input)
-        **z** of shape `(batch, n)`: 
+        **z** of shape `(batch, n)`:
             Float tensor containing the probabilities (must be in [0,1]).
-        **is_input** of shape `(batch, n)`: 
+        **is_input** of shape `(batch, n)`:
             Int tensor indicating which **z** is a input.
 
     Outputs: z
         **z** of shape `(batch, n)`:
-            The prediction probabiolities.
+            The prediction probabilities.
 
     Attributes: S
         **S** of shape `(n, m)`:
-            The learnable clauses matrix containing `m` clauses 
+            The learnable clauses matrix containing `m` clauses
             for the `n` variables.
 
     Examples:
@@ -131,16 +143,18 @@ class SATNet(nn.Module):
         >>> pred = sat(z, is_input)
     '''
 
-    def __init__(self, n, m, aux=0, max_iter=40, eps=1e-4, prox_lam=1e-2, weight_normalize=True):
+    def __init__(self, n, m, aux=0, max_iter=40, eps=1e-4, prox_lam=1e-2, weight_normalize=True, tri_modal=False):
         super(SATNet, self).__init__()
 
-        S_t = torch.FloatTensor(n+1+aux, m)    # n+1 for truth vector
-        S_t = S_t.normal_() 
+        # S_t has first dim n+1 for truth vector, plus aux vars
+        S_t = torch.FloatTensor(n+1+aux, m, requires_grad=True)
+        S_t = S_t.normal_()
         if weight_normalize: S_t = S_t * ((.5/(n+1+aux+m))**0.5)
 
         self.S = nn.Parameter(S_t)
-        self.aux = aux 
+        self.aux = aux
         self.max_iter, self.eps, self.prox_lam = max_iter, eps, prox_lam
+        self.tri_modal = tri_modal
 
     def forward(self, z, is_input):
         B = z.size(0)
@@ -151,6 +165,6 @@ class SATNet(nn.Module):
         is_input = insert_constants(is_input.data, 1, 1, 0, self.aux)
         z = torch.cat([torch.ones(z.size(0),1,device=device), z, torch.zeros(z.size(0),self.aux,device=device)],dim=1)
 
-        z = MixingFunc.apply(self.S, z, is_input, self.max_iter, self.eps, self.prox_lam)
+        z = MixingFunc.apply(self.S, z, is_input, self.max_iter, self.eps, self.prox_lam, self.tri_modal)
 
         return z[:,1:self.S.size(0)-self.aux]
