@@ -85,7 +85,7 @@ class MixingFunc(Function):
 
         ctx.dS = ctx.dS.sum(dim=0)
 
-        return ctx.dS, ctx.dz, None, None, None, None
+        return ctx.dS, ctx.dz, None, None, None, None, None
 
 def insert_constants(x, pre, n_pre, app, n_app):
     ''' prepend and append torch tensors '''
