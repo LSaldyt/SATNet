@@ -8,7 +8,7 @@ import satnet._cpp
 if torch.cuda.is_available(): import satnet._cuda
 
 def tri_modal_gauss(x, σ):
-    gauss = lambda m : torch.sign(m) * torch.exp(-(m**2)/2*(σ**2)) / (σ * torch.sqrt(2. * math.pi))
+    gauss = lambda m : torch.sign(m) * torch.exp(-(m**2)/2*(σ**2)) / (σ * torch.sqrt(torch.tensor(2. * math.pi)))
     return gauss(x + 1) + gauss(x) + gauss(x - 1)
 
 # Manual derivative of tri-modal gauss, because SATNet developers like nitty gritty detail..
