@@ -3,3 +3,4 @@ dist
 satnet.egg-info
 __pycache__
 *.so
+satnet/*.so
