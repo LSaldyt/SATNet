@@ -147,7 +147,7 @@ class SATNet(nn.Module):
         super(SATNet, self).__init__()
 
         # S_t has first dim n+1 for truth vector, plus aux vars
-        S_t = torch.FloatTensor(n+1+aux, m, requires_grad=True)
+        S_t = torch.FloatTensor(n+1+aux, m)
         S_t = S_t.normal_()
         if weight_normalize: S_t = S_t * ((.5/(n+1+aux+m))**0.5)
 
