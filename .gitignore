@@ -1,3 +1,4 @@
 build
 dist
 satnet.egg-info
+satnet/*.so
